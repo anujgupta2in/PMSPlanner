@@ -2,82 +2,90 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from data_processor import DataProcessor
-from utils import DateUtils, format_number
+from plotly.subplots import make_subplots
+import numpy as np
+from datetime import datetime, timedelta
 import io
+from data_processor import DataProcessor
+from utils import FrequencyParser, DateUtils
+
+# Configure page
+st.set_page_config(
+    page_title="Machinery Maintenance Analysis",
+    page_icon="⚙️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize session state
+if 'data_processors' not in st.session_state:
+    st.session_state.data_processors = {}
+if 'filtered_data' not in st.session_state:
+    st.session_state.filtered_data = None
+if 'combined_data' not in st.session_state:
+    st.session_state.combined_data = None
 
 def main():
-    st.set_page_config(
-        page_title="Machinery Maintenance Analysis",
-        page_icon="🔧",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+    st.title("⚙️ Machinery Maintenance Analysis Tool")
+    st.markdown("### Analyze vessel maintenance data by frequency and due dates")
     
-    st.title("🔧 Machinery Maintenance Analysis Tool")
-    st.markdown("*Analyze vessel maintenance data focusing on major machinery with frequencies > 4000 hours OR 30+ months*")
-    
-    # Initialize session state
-    if 'combined_data' not in st.session_state:
-        st.session_state.combined_data = None
-    if 'filtered_data' not in st.session_state:
-        st.session_state.filtered_data = None
-    if 'data_processors' not in st.session_state:
-        st.session_state.data_processors = {}
-    
-    # Sidebar for file upload and controls
+    # Sidebar for file upload and filters
     with st.sidebar:
         st.header("📁 Data Upload")
         
-        # Upload mode selection
+        # Multiple file upload option
         upload_mode = st.radio(
-            "Choose Upload Mode:",
+            "Upload Mode",
             ["Single File", "Multiple Files"],
-            help="Single File: Upload one CSV file\nMultiple Files: Upload multiple CSV files for vessel comparison"
+            help="Choose single file for one vessel or multiple files for vessel comparison"
         )
         
         if upload_mode == "Single File":
             uploaded_file = st.file_uploader(
-                "Choose CSV file",
-                type="csv",
-                help="Upload your machinery maintenance CSV file"
+                "Upload CSV maintenance data file",
+                type=['csv'],
+                help="Upload a CSV file containing machinery maintenance data"
             )
             
             if uploaded_file is not None:
                 try:
-                    with st.spinner("Loading data..."):
+                    # Load and process data
+                    with st.spinner("Processing data..."):
                         processor = DataProcessor()
                         processor.load_data(uploaded_file)
+                        st.session_state.data_processors = {uploaded_file.name: processor}
                         if processor.df is not None:
                             st.session_state.combined_data = processor.df.copy()
-                            st.session_state.data_processors = {uploaded_file.name: processor}
+                        else:
+                            st.session_state.combined_data = None
                     
                     if st.session_state.combined_data is not None:
-                        st.success(f"✅ Loaded {len(st.session_state.combined_data)} records")
+                        st.success(f"✅ Data loaded: {len(st.session_state.combined_data)} records")
                         
                         # Display data info
                         st.subheader("📊 Data Overview")
-                        st.write(f"**Records:** {len(st.session_state.combined_data)}")
+                        st.write(f"**Total Records:** {len(st.session_state.combined_data)}")
                         st.write(f"**Vessels:** {st.session_state.combined_data['Vessel'].nunique()}")
+                        st.write(f"**Vessel Names:** {', '.join(st.session_state.combined_data['Vessel'].unique())}")
                         st.write(f"**Departments:** {st.session_state.combined_data['Department'].nunique()}")
                         st.write(f"**Machinery Locations:** {st.session_state.combined_data['Machinery Location'].nunique()}")
                     else:
-                        st.error("Failed to load data from file")
+                        st.error("Failed to load data")
                         
                 except Exception as e:
-                    st.error(f"❌ Error loading file: {str(e)}")
+                    st.error(f"❌ Error processing file: {str(e)}")
         
         else:  # Multiple Files mode
             uploaded_files = st.file_uploader(
-                "Choose CSV files",
-                type="csv",
+                "Upload multiple CSV files (one per vessel)",
+                type=['csv'],
                 accept_multiple_files=True,
-                help="Upload multiple CSV files for vessel comparison"
+                help="Upload multiple CSV files for vessel comparison analysis"
             )
             
             if uploaded_files:
                 try:
-                    with st.spinner("Loading multiple files..."):
+                    with st.spinner("Processing multiple files..."):
                         all_dataframes = []
                         st.session_state.data_processors = {}
                         
@@ -252,20 +260,22 @@ def display_analysis():
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        total_jobs = len(filtered_df)
-        st.metric("Total Jobs", total_jobs)
+        st.metric("Major Machinery Items", len(filtered_df))
     
     with col2:
-        unique_machinery = filtered_df['Machinery Location'].nunique()
-        st.metric("Machinery Locations", unique_machinery)
+        pending_count = len(filtered_df[filtered_df['Job Status'] == 'Pending'])
+        st.metric("Pending Jobs", pending_count)
     
     with col3:
-        unique_departments = filtered_df['Department'].nunique()
-        st.metric("Departments", unique_departments)
+        overdue_count = len(filtered_df[
+            (filtered_df['Calculated Due Date'].notna()) & 
+            (pd.to_datetime(filtered_df['Calculated Due Date'], errors='coerce') < datetime.now())
+        ])
+        st.metric("Overdue Items", overdue_count)
     
     with col4:
-        unique_job_codes = filtered_df['Job Code'].nunique()
-        st.metric("Job Codes", unique_job_codes)
+        unique_machinery = filtered_df['Machinery Location'].nunique()
+        st.metric("Unique Machinery", unique_machinery)
     
     with col5:
         unique_vessels = filtered_df['Vessel'].nunique()
@@ -410,154 +420,281 @@ def display_yearly_analysis(df):
     st.header("📅 Yearly Maintenance Schedule Analysis")
     
     # Parse dates and create yearly breakdown
-    df_copy = df.copy()
-    df_copy['Due_Date'] = pd.to_datetime(df_copy['Calculated Due Date'], errors='coerce')
-    df_copy['Due_Year'] = df_copy['Due_Date'].dt.year
-    
-    # Filter out invalid dates
-    df_with_dates = df_copy[df_copy['Due_Date'].notna()]
+    df_with_dates = df.copy()
+    df_with_dates['Due Date Parsed'] = pd.to_datetime(df_with_dates['Calculated Due Date'], errors='coerce')
+    df_with_dates = df_with_dates.dropna(subset=['Due Date Parsed'])
     
     if df_with_dates.empty:
-        st.warning("No valid due dates found for yearly analysis.")
+        st.warning("No valid due dates found in the filtered data.")
         return
     
+    df_with_dates['Year'] = df_with_dates['Due Date Parsed'].dt.year
+    df_with_dates['Month'] = df_with_dates['Due Date Parsed'].dt.month
+    df_with_dates['Quarter'] = df_with_dates['Due Date Parsed'].dt.quarter
+    
     # Yearly summary
-    yearly_counts = df_with_dates['Due_Year'].value_counts().sort_index()
+    yearly_summary = df_with_dates.groupby('Year').agg({
+        'Job Code': 'count',
+        'Job Status': lambda x: (x == 'Pending').sum(),
+        'Department': lambda x: x.nunique()
+    }).rename(columns={
+        'Job Code': 'Total Jobs',
+        'Job Status': 'Pending Jobs',
+        'Department': 'Unique Departments'
+    })
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Yearly trend chart
-        fig = px.bar(
-            x=yearly_counts.index,
-            y=yearly_counts.values,
-            title="Maintenance Jobs by Year",
-            labels={'x': 'Year', 'y': 'Number of Jobs'},
-            color=yearly_counts.values,
-            color_continuous_scale='viridis'
+        # Timeline chart
+        fig_timeline = px.scatter(
+            df_with_dates,
+            x='Due Date Parsed',
+            y='Machinery Location',
+            color='Vessel',
+            hover_data=['Job_Details', 'Job Status', 'Frequency', 'Department'],
+            title="Maintenance Timeline by Machinery and Vessel"
         )
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        fig_timeline.update_layout(height=600)
+        st.plotly_chart(fig_timeline, use_container_width=True)
     
     with col2:
-        # Yearly statistics
-        st.subheader("📊 Yearly Statistics")
-        for year in sorted(yearly_counts.index):
-            st.metric(f"Year {int(year)}", int(yearly_counts[year]))
+        st.subheader("Yearly Summary")
+        st.dataframe(yearly_summary, use_container_width=True)
     
-    # Monthly breakdown for current/selected years
-    st.subheader("📅 Monthly Breakdown")
-    df_with_dates['Due_Month'] = df_with_dates['Due_Date'].dt.month
-    df_with_dates['Month_Name'] = df_with_dates['Due_Date'].dt.month_name()
+    # Monthly distribution
+    monthly_dist = df_with_dates.groupby(['Year', 'Month']).size().reset_index(name='Count')
     
-    # Create monthly chart for each year
-    years_available = sorted(df_with_dates['Due_Year'].unique())
-    selected_year = st.selectbox("Select Year for Monthly Analysis", years_available)
+    fig_monthly = px.bar(
+        monthly_dist,
+        x='Month',
+        y='Count',
+        color='Year',
+        title="Monthly Distribution of Due Dates",
+        labels={'Month': 'Month', 'Count': 'Number of Jobs'}
+    )
+    st.plotly_chart(fig_monthly, use_container_width=True)
     
-    if selected_year:
-        year_data = df_with_dates[df_with_dates['Due_Year'] == selected_year]
-        monthly_counts = year_data['Month_Name'].value_counts()
-        
-        # Reorder months properly
-        month_order = ['January', 'February', 'March', 'April', 'May', 'June',
-                      'July', 'August', 'September', 'October', 'November', 'December']
-        monthly_counts = monthly_counts.reindex([month for month in month_order if month in monthly_counts.index], fill_value=0)
-        
-        fig = px.bar(
-            x=monthly_counts.index,
-            y=monthly_counts.values,
-            title=f"Monthly Distribution for {int(selected_year)}",
-            labels={'x': 'Month', 'y': 'Number of Jobs'}
-        )
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+    # Quarterly analysis
+    quarterly_dist = df_with_dates.groupby(['Year', 'Quarter']).size().reset_index(name='Count')
+    
+    fig_quarterly = px.line(
+        quarterly_dist,
+        x='Quarter',
+        y='Count',
+        color='Year',
+        title="Quarterly Maintenance Load",
+        markers=True
+    )
+    st.plotly_chart(fig_quarterly, use_container_width=True)
+
+
 
 def display_machinery_breakdown(df):
     """Display machinery-specific breakdown"""
-    st.header("🔧 Machinery wise analysis")
+    st.header("🔧 Machinery Breakdown Analysis")
     
-    # Machinery location analysis
+    # Note: df is already filtered for major machinery based on frequency criteria
+    
+    # Top machinery by job count
     machinery_counts = df['Machinery Location'].value_counts().head(20)
     
-    col1, col2 = st.columns([2, 1])
+    fig_machinery = px.bar(
+        x=machinery_counts.values,
+        y=machinery_counts.index,
+        orientation='h',
+        title="Top 20 Machinery by Job Count",
+        labels={'x': 'Number of Jobs', 'y': 'Machinery Location'}
+    )
+    fig_machinery.update_layout(height=600)
+    st.plotly_chart(fig_machinery, use_container_width=True)
+    
+    # Job action distribution
+    action_dist = df['Job Action'].value_counts()
+    
+    col1, col2 = st.columns(2)
     
     with col1:
-        # Top machinery locations chart
-        fig = px.bar(
-            x=machinery_counts.values,
-            y=machinery_counts.index,
-            orientation='h',
-            title="Top 20 Machinery Locations by Job Count",
-            labels={'x': 'Number of Jobs', 'y': 'Machinery Location'}
+        fig_actions = px.pie(
+            values=action_dist.values,
+            names=action_dist.index,
+            title="Distribution of Job Actions"
         )
-        fig.update_layout(height=600)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_actions, use_container_width=True)
     
     with col2:
-        # Machinery statistics
-        st.subheader("📊 Machinery Statistics")
-        st.metric("Total Machinery Locations", df['Machinery Location'].nunique())
-        st.metric("Total Jobs", len(df))
-        st.metric("Avg Jobs per Machinery", round(len(df) / df['Machinery Location'].nunique(), 2))
+        # Status distribution
+        status_dist = df['Job Status'].value_counts()
+        fig_status = px.pie(
+            values=status_dist.values,
+            names=status_dist.index,
+            title="Distribution of Job Status"
+        )
+        st.plotly_chart(fig_status, use_container_width=True)
     
-    # Department breakdown
-    st.subheader("🏢 Department Analysis")
-    dept_counts = df['Department'].value_counts()
+    # Detailed machinery table
+    st.subheader("Detailed Machinery Information (Pending Jobs Only - Major Machinery)")
     
-    fig = px.pie(
-        values=dept_counts.values,
-        names=dept_counts.index,
-        title="Jobs Distribution by Department"
-    )
-    fig.update_layout(height=400)
-    st.plotly_chart(fig, use_container_width=True)
+    # Use already filtered data from session state instead of re-filtering
+    if 'filtered_data' in st.session_state and st.session_state.filtered_data is not None:
+        filtered_df = st.session_state.filtered_data
+    else:
+        filtered_df = df
     
-    # Detailed machinery information by vessel
-    st.subheader("🚢 Detailed Machinery Information by Vessel")
+    # Filter for pending jobs only
+    pending_df = filtered_df[filtered_df['Job Status'] == 'Pending'].copy()
     
-    # Group by vessel and machinery location
-    vessel_machinery = df.groupby(['Vessel', 'Machinery Location']).agg({
-        'Job Code': 'count',
-        'Frequency': lambda x: ', '.join(x.dropna().unique()[:3]) if len(x.dropna()) > 0 else 'N/A',
-        'Job Action': lambda x: ', '.join(x.dropna().unique()[:2]) if len(x.dropna()) > 0 else 'N/A'
-    }).reset_index()
+    # Apply job action filter if any are stored in session state
+    if hasattr(st.session_state, 'current_job_actions') and st.session_state.current_job_actions:
+        pending_df = pending_df[pending_df['Job Action'].isin(st.session_state.current_job_actions)]
     
-    vessel_machinery.columns = ['Vessel', 'Machinery Location', 'Job Count', 'Frequency Sample', 'Job Actions']
-    vessel_machinery = vessel_machinery.sort_values(['Vessel', 'Job Count'], ascending=[True, False])
+    if pending_df.empty:
+        st.warning("No pending jobs found for major machinery in the selected criteria.")
+        return
     
-    # Display by vessel
-    for vessel in sorted(df['Vessel'].unique()):
-        with st.expander(f"🚢 {vessel} - Machinery Details"):
-            vessel_data = vessel_machinery[vessel_machinery['Vessel'] == vessel]
-            st.dataframe(vessel_data.drop('Vessel', axis=1), use_container_width=True)
+    # Get current filter values from session state for display
+    freq_hours = getattr(st.session_state, 'current_freq_hours', 4000)
+    freq_months = getattr(st.session_state, 'current_freq_months', 30)
+    
+    # Display current filter criteria for clarity
+    st.info(f"📋 Showing pending jobs for machinery with frequency ≥ {freq_hours} hours OR ≥ {freq_months} months")
+    
+    # Show count of filtered vs total
+    total_pending = len(df[df['Job Status'] == 'Pending'])
+    major_pending = len(pending_df)
+    st.write(f"**Filtered Results:** {major_pending} pending jobs for major machinery (out of {total_pending} total pending jobs)")
+    
+    # Show vessel count
+    unique_vessels = pending_df['Vessel'].nunique()
+    vessel_names = ', '.join(pending_df['Vessel'].unique())
+    st.write(f"**Vessels:** {unique_vessels} vessel(s) - {vessel_names}")
+    
+    # Create detailed summary by machinery location for pending jobs only
+    machinery_details = pending_df.groupby('Machinery Location').agg({
+        'Job Code': lambda x: ', '.join(x.dropna().astype(str)) + f' (Total: {len(x)})',
+        'Title': lambda x: ', '.join(x.dropna().astype(str)) + f' (Total: {len(x)})',
+        'Job Status': 'count',  # All are pending, so just count them
+        'Vessel': lambda x: ', '.join(x.dropna().astype(str).unique()),
+        'Department': lambda x: ', '.join(x.dropna().astype(str).unique()),
+        'Frequency': lambda x: ', '.join(x.dropna().astype(str).unique()),
+        'Calculated Due Date': lambda x: x.min() if x.notna().any() else None
+    })
+    
+    # Rename columns
+    machinery_details.columns = ['Job Codes', 'Job Titles', 'Pending Jobs', 'Vessels', 'Departments', 'Frequencies', 'Next Due Date']
+    
+    # Add total job count as separate column (from pending jobs only)
+    machinery_details['Total Jobs'] = pending_df.groupby('Machinery Location').size()
+    
+    # Reorder columns
+    machinery_details = machinery_details[['Total Jobs', 'Pending Jobs', 'Vessels', 'Job Codes', 'Job Titles', 'Departments', 'Frequencies', 'Next Due Date']]
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.dataframe(machinery_details, use_container_width=True, height=600)
+    
+    with col2:
+        st.subheader("Export Options")
+        
+        # Export detailed machinery information
+        csv_detailed = machinery_details.to_csv()
+        st.download_button(
+            label="📥 Download Detailed Machinery Info (CSV)",
+            data=csv_detailed,
+            file_name=f"detailed_machinery_info_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+        
+        # Also provide full detailed records export (pending jobs only)
+        full_detailed_view = pending_df[['Vessel', 'Machinery Location', 'Job Code', 'Title', 'Job_Details', 'Frequency', 
+                                       'Calculated Due Date', 'Job Status', 'Department', 'Performing Rank']].copy()
+        full_detailed_view = full_detailed_view.sort_values(['Machinery Location', 'Calculated Due Date'])
+        
+        csv_full_detailed = full_detailed_view.to_csv(index=False)
+        st.download_button(
+            label="📋 Download Pending Records (CSV)",
+            data=csv_full_detailed,
+            file_name=f"pending_machinery_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+        
+        st.subheader("Quick Stats")
+        total_machinery = len(machinery_details)
+        total_jobs = machinery_details['Total Jobs'].sum()
+        total_pending = machinery_details['Pending Jobs'].sum()
+        
+        st.metric("Machinery Locations", total_machinery)
+        st.metric("Total Jobs", total_jobs)
+        st.metric("Pending Jobs", total_pending)
 
 def prepare_export_data(df):
     """Prepare data for export with specified columns and naming"""
     export_df = df.copy()
     
-    # Create a renamed copy for export
-    if 'Unnamed: 0' in export_df.columns:
-        export_df = export_df.rename(columns={'Unnamed: 0': 'Critical Job'})
+    # Define the exact column order based on the original data, excluding "Unnamed: 3"
+    export_columns = [
+        'Critical Job',           # Renamed from 'Unnamed: 0'
+        'Job Code',
+        'Frequency',
+        'Calculated Due Date',
+        'Job Status',
+        'Performing Rank',
+        'Machinery Location',
+        'Sub Component Location',
+        'Remaining Running Hours',
+        'Vessel',
+        'CMS Code',
+        'Last Done Date',
+        'Completion Date',
+        'Last Done Running Hours',
+        'Function',
+        'Machinery Running Hours',
+        'Attachment Indicator',
+        'Department',
+        'Job Source',
+        'Due Date',
+        'Next Due',
+        'Job Action',
+        'Title',
+        'Job_Details'
+    ]
     
-    # Remove Unnamed: 3 column if it exists
-    if 'Unnamed: 3' in export_df.columns:
-        export_df = export_df.drop('Unnamed: 3', axis=1)
+    # Create export dataframe with specified columns
+    export_data = pd.DataFrame()
     
-    return export_df
+    for col in export_columns:
+        if col == 'Critical Job':
+            # Use original 'Unnamed: 0' data if available, otherwise create sequential numbers
+            if 'Unnamed: 0' in export_df.columns:
+                export_data[col] = export_df['Unnamed: 0']
+            else:
+                export_data[col] = range(1, len(export_df) + 1)
+        elif col == 'Job_Details':
+            # Use the combined Job Code + Title column we created, or create it if missing
+            if 'Job_Details' in export_df.columns:
+                export_data[col] = export_df['Job_Details']
+            else:
+                job_code = export_df.get('Job Code', '').astype(str)
+                title = export_df.get('Title', '').astype(str)
+                export_data[col] = job_code + " - " + title
+        else:
+            # Use existing column if available, otherwise create empty column
+            export_data[col] = export_df.get(col, '')
+    
+    return export_data
 
 def display_export_options(df):
     """Display data export options"""
-    st.header("📋 Data Export & Reports")
-    
-    # Prepare export data
-    export_df = prepare_export_data(df)
+    st.header("📋 Data Export")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("📊 Export Filtered Data")
-        st.write(f"**Records to export:** {len(export_df)}")
-        st.write(f"**Columns:** {len(export_df.columns)}")
+        st.subheader("Export Filtered Data")
+        
+        # Prepare export data with specified columns and order
+        export_df = prepare_export_data(df)
         
         # CSV export
         csv_buffer = io.StringIO()
@@ -565,83 +702,93 @@ def display_export_options(df):
         csv_data = csv_buffer.getvalue()
         
         st.download_button(
-            label="📥 Download as CSV",
+            label="📥 Download Filtered Data (CSV)",
             data=csv_data,
-            file_name=f"machinery_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            help="Download the filtered data as a CSV file"
+            file_name=f"major_machinery_maintenance_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
         )
+        
+        # Summary statistics  
+        st.subheader("Summary Statistics")
+        
+        # Show export preview
+        export_preview = export_df.head(5)
+        st.write("**Export Preview (First 5 rows):**")
+        st.dataframe(export_preview, use_container_width=True)
+        
+        summary_stats = {
+            "Total Records": len(export_df),
+            "Export Columns": len(export_df.columns),
+            "Date Range": f"{df['Calculated Due Date'].min()} to {df['Calculated Due Date'].max()}" if 'Calculated Due Date' in df.columns else "N/A"
+        }
+        
+        for key, value in summary_stats.items():
+            st.write(f"**{key}:** {value}")
     
     with col2:
-        st.subheader("📄 Analysis Report")
+        st.subheader("Analysis Report")
         
-        # Generate report
-        report_text = generate_analysis_report(df)
+        # Generate analysis report
+        report = generate_analysis_report(df)
         
         st.download_button(
-            label="📥 Download Report",
-            data=report_text,
-            file_name=f"analysis_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain",
-            help="Download a text-based analysis report"
+            label="📊 Download Analysis Report (TXT)",
+            data=report,
+            file_name=f"maintenance_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain"
         )
-    
-    # Data preview
-    st.subheader("👀 Export Data Preview")
-    st.dataframe(export_df.head(10), use_container_width=True)
+        
+        st.subheader("Data Preview")
+        
+        # Show complete filtered data with key columns
+        preview_columns = ['Vessel', 'Job_Details', 'Machinery Location', 'Frequency', 'Calculated Due Date', 'Job Status', 'Department']
+        available_columns = [col for col in preview_columns if col in df.columns]
+        preview_df = df[available_columns]
+        
+        st.write(f"**Complete Filtered Data:** {len(preview_df)} records")
+        st.dataframe(preview_df, use_container_width=True, height=400)
+        
+        # Download option for complete preview data
+        preview_csv = preview_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Complete Preview Data (CSV)",
+            data=preview_csv,
+            file_name=f"filtered_data_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
 
 def generate_analysis_report(df):
     """Generate a text-based analysis report"""
     report = f"""
 MACHINERY MAINTENANCE ANALYSIS REPORT
-Generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
-=====================================
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 SUMMARY STATISTICS:
-- Total Jobs: {len(df)}
+- Total Major Machinery Records: {len(df)}
 - Unique Machinery Locations: {df['Machinery Location'].nunique()}
-- Unique Vessels: {df['Vessel'].nunique()}
-- Unique Departments: {df['Department'].nunique()}
-- Unique Job Codes: {df['Job Code'].nunique()}
+- Departments Involved: {df['Department'].nunique()}
+- Pending Jobs: {len(df[df['Job Status'] == 'Pending'])}
+- Overdue Items: {len(df[(df['Calculated Due Date'].notna()) & (pd.to_datetime(df['Calculated Due Date'], errors='coerce') < datetime.now())])}
 
-VESSEL BREAKDOWN:
-"""
-    
-    for vessel in sorted(df['Vessel'].unique()):
-        vessel_data = df[df['Vessel'] == vessel]
-        report += f"- {vessel}: {len(vessel_data)} jobs\n"
-    
-    report += f"""
+TOP 10 MACHINERY BY JOB COUNT:
+{df['Machinery Location'].value_counts().head(10).to_string()}
+
+JOB ACTION DISTRIBUTION:
+{df['Job Action'].value_counts().to_string()}
+
 DEPARTMENT BREAKDOWN:
+{df['Department'].value_counts().to_string()}
+
+FREQUENCY ANALYSIS:
+Most Common Frequencies:
+{df['Frequency'].value_counts().head(10).to_string()}
+
+DATE RANGE:
+Earliest Due Date: {df['Calculated Due Date'].min()}
+Latest Due Date: {df['Calculated Due Date'].max()}
+
+This report was generated by the Machinery Maintenance Analysis Tool.
 """
-    
-    dept_counts = df['Department'].value_counts()
-    for dept, count in dept_counts.head(10).items():
-        report += f"- {dept}: {count} jobs\n"
-    
-    report += f"""
-TOP MACHINERY LOCATIONS:
-"""
-    
-    machinery_counts = df['Machinery Location'].value_counts()
-    for machinery, count in machinery_counts.head(10).items():
-        report += f"- {machinery}: {count} jobs\n"
-    
-    # Add yearly analysis if dates are available
-    df_copy = df.copy()
-    df_copy['Due_Date'] = pd.to_datetime(df_copy['Calculated Due Date'], errors='coerce')
-    df_with_dates = df_copy[df_copy['Due_Date'].notna()]
-    
-    if not df_with_dates.empty:
-        df_with_dates['Due_Year'] = df_with_dates['Due_Date'].dt.year
-        yearly_counts = df_with_dates['Due_Year'].value_counts().sort_index()
-        
-        report += f"""
-YEARLY SCHEDULE:
-"""
-        for year in sorted(yearly_counts.index):
-            report += f"- {int(year)}: {int(yearly_counts[year])} jobs\n"
-    
     return report
 
 if __name__ == "__main__":
