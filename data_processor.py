@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
-from utils import FrequencyParser
-import streamlit as st
+from datetime import datetime
+import re
+from utils import FrequencyParser, DateUtils
 
 class DataProcessor:
     """Main data processing class for machinery maintenance data"""
@@ -9,47 +10,51 @@ class DataProcessor:
     def __init__(self):
         self.df = None
         self.frequency_parser = FrequencyParser()
+        self.date_utils = DateUtils()
     
     def load_data(self, file):
         """Load and clean data from uploaded CSV file"""
         try:
-            if hasattr(file, 'read'):
-                # File-like object from Streamlit
-                self.df = pd.read_csv(file)
-            else:
-                # File path string
-                self.df = pd.read_csv(file)
+            # Read CSV file
+            self.df = pd.read_csv(file)
             
-            # Validate required columns
-            if not self.validate_data():
-                return False
+            # Clean column names (remove BOM and whitespace)
+            self.df.columns = self.df.columns.str.strip().str.replace('\ufeff', '')
             
-            # Clean the data
+            # Basic data cleaning
             self._clean_data()
+            
             return True
             
         except Exception as e:
-            st.error(f"Error loading data: {str(e)}")
-            return False
+            raise Exception(f"Error loading data: {str(e)}")
     
     def _clean_data(self):
         """Perform basic data cleaning operations"""
-        if self.df is None:
-            return
-        
         # Remove completely empty rows
         self.df = self.df.dropna(how='all')
         
-        # Clean whitespace from string columns
+        # Strip whitespace from string columns
         string_columns = self.df.select_dtypes(include=['object']).columns
         for col in string_columns:
             self.df[col] = self.df[col].astype(str).str.strip()
         
-        # Replace empty strings with NaN
-        self.df = self.df.replace('', np.nan)
+        # Replace empty strings and 'nan' with NaN
+        self.df = self.df.replace(['', 'nan', 'None'], np.nan)
         
-        # Parse dates - try multiple formats
-        date_columns = ['Last Done Date', 'Calculated Due Date', 'Due Date']
+        # Clean numeric columns
+        if 'Remaining Running Hours' in self.df.columns:
+            self.df['Remaining Running Hours'] = pd.to_numeric(
+                self.df['Remaining Running Hours'], errors='coerce'
+            )
+        
+        if 'Machinery Running Hours' in self.df.columns:
+            self.df['Machinery Running Hours'] = pd.to_numeric(
+                self.df['Machinery Running Hours'], errors='coerce'
+            )
+        
+        # Parse dates with flexible format handling
+        date_columns = ['Calculated Due Date', 'Last Done Date', 'Completion Date', 'Due Date', 'Next Due']
         for col in date_columns:
             if col in self.df.columns:
                 self.df[col] = pd.to_datetime(self.df[col], dayfirst=True, errors='coerce')
@@ -59,16 +64,20 @@ class DataProcessor:
         if self.df is None:
             raise Exception("No data loaded. Please load data first.")
         
+        # Create a copy for filtering
         filtered_df = self.df.copy()
         
-        # Create frequency mask - starts with all False
-        frequency_mask = pd.Series([False] * len(filtered_df), index=filtered_df.index)
+        # Parse frequencies to comparable values
+        filtered_df['Frequency_Hours'] = filtered_df['Frequency'].apply(
+            self.frequency_parser.parse_to_hours
+        )
+        filtered_df['Frequency_Months'] = filtered_df['Frequency'].apply(
+            self.frequency_parser.parse_to_months
+        )
         
-        # Check each frequency value individually
-        if 'Frequency' not in filtered_df.columns:
-            raise Exception("'Frequency' column not found in data")
+        # Apply frequency filters with strict checking based on original frequency format
+        frequency_mask = pd.Series([False] * len(filtered_df))
         
-        # Apply frequency filtering with strict validation
         for idx, freq_str in enumerate(filtered_df['Frequency']):
             if pd.isna(freq_str) or freq_str == '':
                 continue
@@ -140,14 +149,18 @@ class DataProcessor:
     def get_summary_stats(self):
         """Get summary statistics for the loaded data"""
         if self.df is None:
-            return None
+            return {}
         
         stats = {
             'total_records': len(self.df),
-            'unique_vessels': self.df['Vessel'].nunique() if 'Vessel' in self.df.columns else 0,
-            'unique_machinery': self.df['Machinery Location'].nunique() if 'Machinery Location' in self.df.columns else 0,
-            'unique_departments': self.df['Department'].nunique() if 'Department' in self.df.columns else 0,
-            'unique_job_codes': self.df['Job Code'].nunique() if 'Job Code' in self.df.columns else 0
+            'vessels': self.df['Vessel'].nunique() if 'Vessel' in self.df.columns else 0,
+            'departments': self.df['Department'].nunique() if 'Department' in self.df.columns else 0,
+            'machinery_locations': self.df['Machinery Location'].nunique() if 'Machinery Location' in self.df.columns else 0,
+            'pending_jobs': len(self.df[self.df['Job Status'] == 'Pending']) if 'Job Status' in self.df.columns else 0,
+            'date_range': {
+                'min_date': self.df['Calculated Due Date'].min() if 'Calculated Due Date' in self.df.columns else None,
+                'max_date': self.df['Calculated Due Date'].max() if 'Calculated Due Date' in self.df.columns else None
+            }
         }
         
         return stats
@@ -155,44 +168,37 @@ class DataProcessor:
     def get_frequency_distribution(self):
         """Get distribution of maintenance frequencies"""
         if self.df is None or 'Frequency' not in self.df.columns:
-            return None
+            return {}
         
         freq_counts = self.df['Frequency'].value_counts()
-        return freq_counts
+        return freq_counts.to_dict()
     
     def get_machinery_breakdown(self):
         """Get breakdown by machinery location"""
         if self.df is None or 'Machinery Location' not in self.df.columns:
-            return None
+            return pd.DataFrame()
         
-        machinery_stats = self.df.groupby('Machinery Location').agg({
+        breakdown = self.df.groupby('Machinery Location').agg({
             'Job Code': 'count',
-            'Frequency': lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else 'N/A',
-            'Department': lambda x: ', '.join(x.unique()[:3])
-        }).rename(columns={
-            'Job Code': 'Total Jobs',
-            'Frequency': 'Most Common Frequency',
-            'Department': 'Departments'
+            'Job Status': lambda x: (x == 'Pending').sum(),
+            'Department': lambda x: ', '.join(x.dropna().astype(str).unique()) if x.notna().any() else 'Unknown',
+            'Frequency': lambda x: ', '.join(x.dropna().astype(str).unique()[:3]) if x.notna().any() else 'Unknown'
         })
         
-        machinery_stats = machinery_stats.sort_values('Total Jobs', ascending=False)
-        return machinery_stats
+        # Rename columns manually
+        breakdown.columns = ['Total Jobs', 'Pending Jobs', 'Departments', 'Frequencies']
+        
+        return breakdown.sort_values('Total Jobs', ascending=False)
     
     def validate_data(self):
         """Validate the loaded data for required columns"""
         if self.df is None:
-            return False
+            return False, "No data loaded"
         
-        required_columns = [
-            'Vessel', 'Department', 'Machinery Location', 
-            'Job Code', 'Title', 'Frequency', 'Job Action'
-        ]
-        
+        required_columns = ['Job Code', 'Frequency', 'Calculated Due Date', 'Machinery Location']
         missing_columns = [col for col in required_columns if col not in self.df.columns]
         
         if missing_columns:
-            st.error(f"Missing required columns: {', '.join(missing_columns)}")
-            st.info("Available columns: " + ", ".join(self.df.columns.tolist()))
-            return False
+            return False, f"Missing required columns: {', '.join(missing_columns)}"
         
-        return True
+        return True, "Data validation passed"
