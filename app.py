@@ -708,22 +708,6 @@ def display_export_options(df):
             mime="text/csv"
         )
         
-        # Summary statistics  
-        st.subheader("Summary Statistics")
-        
-        # Show export preview
-        export_preview = export_df.head(5)
-        st.write("**Export Preview (First 5 rows):**")
-        st.dataframe(export_preview, use_container_width=True)
-        
-        summary_stats = {
-            "Total Records": len(export_df),
-            "Export Columns": len(export_df.columns),
-            "Date Range": f"{df['Calculated Due Date'].min()} to {df['Calculated Due Date'].max()}" if 'Calculated Due Date' in df.columns else "N/A"
-        }
-        
-        for key, value in summary_stats.items():
-            st.write(f"**{key}:** {value}")
     
     with col2:
         st.subheader("Analysis Report")
@@ -738,24 +722,26 @@ def display_export_options(df):
             mime="text/plain"
         )
         
-        st.subheader("Data Preview")
-        
-        # Show complete filtered data with key columns
-        preview_columns = ['Vessel', 'Job_Details', 'Machinery Location', 'Frequency', 'Calculated Due Date', 'Job Status', 'Department']
-        available_columns = [col for col in preview_columns if col in df.columns]
-        preview_df = df[available_columns]
-        
-        st.write(f"**Complete Filtered Data:** {len(preview_df)} records")
-        st.dataframe(preview_df, use_container_width=True, height=400)
-        
-        # Download option for complete preview data
-        preview_csv = preview_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Complete Preview Data (CSV)",
-            data=preview_csv,
-            file_name=f"filtered_data_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+
+    # Data Preview Section (full width)
+    st.subheader("📋 Data Preview")
+    
+    # Show complete filtered data with key columns including Sub component
+    preview_columns = ['Vessel', 'Job_Details', 'Machinery Location', 'Sub Component', 'Sub Component Location', 'Frequency', 'Calculated Due Date', 'Job Status', 'Department']
+    available_columns = [col for col in preview_columns if col in df.columns]
+    preview_df = df[available_columns]
+    
+    st.write(f"**Complete Filtered Data:** {len(preview_df)} records")
+    st.dataframe(preview_df, use_container_width=True, height=400)
+    
+    # Download option for complete preview data
+    preview_csv = preview_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download Complete Preview Data (CSV)",
+        data=preview_csv,
+        file_name=f"filtered_data_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
 
 def generate_analysis_report(df):
     """Generate a text-based analysis report"""
